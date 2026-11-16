@@ -17,7 +17,7 @@ pub fn conv(input: &Tensor, weight: &Tensor, bias: &Tensor, name: &str) -> Resul
 
 pub fn leaky_relu(input: &Tensor, name: &str) -> Result<Tensor> {
     // ESRGAN hardcoded attributes
-    const ALPHA: f32 = 0.2;
+    const ALPHA: f32 = 0.20000000298023224;
     let data = input.data();
 
     #[cfg(not(target_arch = "x86_64"))]
@@ -101,19 +101,21 @@ pub fn add(input_a: &Tensor, input_b: &Tensor, name: &str) -> Result<Tensor> {
     let b_dim = input_b.dims();
     let n = input_a.data().len();
 
+    assert_eq!(
+        a_dim, b_dim,
+        "ESRGAN's add operation requires inputs with the same shape"
+    );
+
     #[cfg(not(target_arch = "x86_64"))]
-    if a_dim == b_dim {
-        let data: Vec<f32> = input_a
-            .data()
-            .iter()
-            .zip(input_b.data().iter())
-            .map(|(a, b)| a.algebraic_add(b))
-            .collect();
-        return Tensor::create(name, a_dim.to_vec(), data);
-    }
+    let data: Vec<f32> = input_a
+        .data()
+        .iter()
+        .zip(input_b.data().iter())
+        .map(|(a, b)| a.algebraic_add(b))
+        .collect();
 
     #[cfg(target_arch = "x86_64")]
-    if a_dim == b_dim {
+    let data = {
         let mut data = Vec::with_capacity(n);
         let dp: *mut f32 = data.as_mut_ptr();
         let ap = input_a.data().as_ptr();
@@ -148,67 +150,76 @@ pub fn add(input_a: &Tensor, input_b: &Tensor, name: &str) -> Result<Tensor> {
             }
             data.set_len(n);
         }
-        return Tensor::create(name, a_dim.to_vec(), data);
-    }
-    broadcast_op(input_a, input_b, name, |a, b| a.algebraic_add(b))
+        data
+    };
+
+    Tensor::create(name, a_dim.to_vec(), data)
+
+    // ESRGAN's all add operations does not require broadcasting, they have same shape
+    // broadcast_op(input_a, input_b, name, |a, b| a.algebraic_add(b))
 }
 
+// ESRGAN's all mul operation are tensor * rank-0 aka scalar
 pub fn mul(input_a: &Tensor, input_b: &Tensor, name: &str) -> Result<Tensor> {
     let a_dim = input_a.dims();
-    let b_dim = input_b.dims();
     let n = input_a.data().len();
+    let alpha = 0.20000000298023224;
+
+    assert!(
+        input_b.dims().is_empty(),
+        "ESRGAN's mul operation requires rank-0 tensor as second input"
+    );
+    assert_eq!(
+        input_b.data(),
+        &[alpha],
+        "ESRGAN's mul operation requires second input to be rank-0 tensor with value 0.20000000298023224"
+    );
 
     #[cfg(not(target_arch = "x86_64"))]
-    if a_dim == b_dim {
-        let data: Vec<f32> = input_a
-            .data()
-            .iter()
-            .zip(input_b.data().iter())
-            .map(|(a, b)| a.algebraic_mul(b))
-            .collect();
-        return Tensor::create(name, a_dim.to_vec(), data);
-    }
+    let data: Vec<f32> = input_a
+        .data()
+        .iter()
+        .map(|a| a.algebraic_mul(alpha))
+        .collect();
+
     #[cfg(target_arch = "x86_64")]
-    if a_dim == b_dim {
+    let data = {
         let mut data = Vec::with_capacity(n);
         let dp: *mut f32 = data.as_mut_ptr();
         let ap = input_a.data().as_ptr();
-        let bp = input_b.data().as_ptr();
 
         unsafe {
             let mut i = 0;
+            let alpha_v = _mm256_set1_ps(alpha);
             while i + 32 <= n {
                 let a0 = _mm256_loadu_ps(ap.add(i));
                 let a1 = _mm256_loadu_ps(ap.add(i + 8));
                 let a2 = _mm256_loadu_ps(ap.add(i + 16));
                 let a3 = _mm256_loadu_ps(ap.add(i + 24));
-                let b0 = _mm256_loadu_ps(bp.add(i));
-                let b1 = _mm256_loadu_ps(bp.add(i + 8));
-                let b2 = _mm256_loadu_ps(bp.add(i + 16));
-                let b3 = _mm256_loadu_ps(bp.add(i + 24));
-                _mm256_storeu_ps(dp.add(i), _mm256_mul_ps(a0, b0));
-                _mm256_storeu_ps(dp.add(i + 8), _mm256_mul_ps(a1, b1));
-                _mm256_storeu_ps(dp.add(i + 16), _mm256_mul_ps(a2, b2));
-                _mm256_storeu_ps(dp.add(i + 24), _mm256_mul_ps(a3, b3));
+                _mm256_storeu_ps(dp.add(i), _mm256_mul_ps(a0, alpha_v));
+                _mm256_storeu_ps(dp.add(i + 8), _mm256_mul_ps(a1, alpha_v));
+                _mm256_storeu_ps(dp.add(i + 16), _mm256_mul_ps(a2, alpha_v));
+                _mm256_storeu_ps(dp.add(i + 24), _mm256_mul_ps(a3, alpha_v));
                 i += 32;
             }
             while i + 8 <= n {
                 let a = _mm256_loadu_ps(ap.add(i));
-                let b = _mm256_loadu_ps(bp.add(i));
-                _mm256_storeu_ps(dp.add(i), _mm256_mul_ps(a, b));
+                _mm256_storeu_ps(dp.add(i), _mm256_mul_ps(a, alpha_v));
                 i += 8;
             }
             while i < n {
-                *dp.add(i) = *ap.add(i) * *bp.add(i);
+                *dp.add(i) = *ap.add(i) * alpha;
                 i += 1;
             }
             data.set_len(n);
         }
-        return Tensor::create(name, a_dim.to_vec(), data);
-    }
-    broadcast_op(input_a, input_b, name, |a, b| a.algebraic_mul(b))
+        data
+    };
+
+    Tensor::create(name, a_dim.to_vec(), data)
 }
 
+#[allow(unused)]
 #[inline(always)]
 fn broadcast_op<OP>(x: &Tensor, y: &Tensor, name: &str, op: OP) -> Result<Tensor>
 where
