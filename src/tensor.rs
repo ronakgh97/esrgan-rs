@@ -15,12 +15,10 @@ impl Tensor {
             .try_fold(1usize, |a, &d| {
                 usize::try_from(d).ok().and_then(|d| a.checked_mul(d))
             })
-            .ok_or_else(|| {
-                anyhow::anyhow!("Tensor '{name}': dims {dims:?} overflow element count")
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("tensor '{name}': dims {dims:?} overflow"))?;
         if numel != data.len() {
             return Err(anyhow::anyhow!(
-                "Tensor '{name}': dims {dims:?} has {numel} elements, but data has {} elements",
+                "tensor '{name}': dims {dims:?} has {numel} elements, but data has {} elements",
                 data.len()
             ));
         }
