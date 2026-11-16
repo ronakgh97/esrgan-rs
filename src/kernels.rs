@@ -125,7 +125,7 @@ pub fn conv(input: &Tensor, weight: &Tensor, bias: &Tensor, name: &str) -> Resul
     // each input byte is read from DRAM exactly once
     let threads = rayon::current_num_threads().max(1);
     let mut bands = threads.min(h).max(1);
-    while h % bands != 0 {
+    while !h.is_multiple_of(bands) {
         bands -= 1;
     }
     let r = h / bands;
@@ -172,33 +172,33 @@ pub fn conv(input: &Tensor, weight: &Tensor, bias: &Tensor, name: &str) -> Resul
 pub fn leaky_relu(input: &Tensor, alpha: f32, name: &str) -> Result<Tensor> {
     // ESRGAN hardcoded attributes
     #[allow(clippy::excessive_precision)]
-    let alpha = 0.20000000298023224;
+    const ALPHA: f32 = 0.20000000298023224;
     let data = &input.data;
     let dim = &input.dims;
 
     assert_eq!(
-        alpha, 0.20000000298023224,
+        alpha, ALPHA,
         "ESRGAN's leaky_relu operation requires alpha=0.2"
     );
 
     #[inline(always)]
     #[cfg(not(target_arch = "x86_64"))]
-    fn leaky_relu_inner(input: &[f32], alpha: f32) -> Result<Vec<f32>> {
+    fn leaky_relu_inner(input: &[f32]) -> Result<Vec<f32>> {
         let output_data: Vec<f32> = input
             .iter()
-            .map(|&x| if x < 0.0 { x.algebraic_mul(alpha) } else { x })
+            .map(|&x| if x < 0.0 { x.algebraic_mul(ALPHA) } else { x })
             .collect();
         Ok(output_data)
     }
     #[inline(always)]
     #[cfg(target_arch = "x86_64")]
-    fn leaky_relu_inner(input: &[f32], alpha: f32) -> Result<Vec<f32>> {
+    fn leaky_relu_inner(input: &[f32]) -> Result<Vec<f32>> {
         let mut data = vec![0f32; input.len()];
 
         if data.len() >= 8 {
             unsafe {
                 let zero = _mm256_setzero_ps();
-                let va = _mm256_set1_ps(alpha);
+                let va = _mm256_set1_ps(ALPHA);
 
                 let (input_chunk32, input_rem32) = input.as_chunks::<32>();
                 let (output_chunk32, output_rem32) = data.as_chunks_mut::<32>();
@@ -238,61 +238,60 @@ pub fn leaky_relu(input: &Tensor, alpha: f32, name: &str) -> Result<Tensor> {
                     _mm256_storeu_ps(output.as_mut_ptr(), _mm256_blendv_ps(v, a, m));
                 }
                 for (&v, out) in input_rem8.iter().zip(output_rem8.iter_mut()) {
-                    *out = if v < 0.0 { alpha * v } else { v };
+                    *out = if v < 0.0 { ALPHA.algebraic_mul(v) } else { v };
                 }
             }
         } else {
             for (&v, out) in input.iter().zip(data.iter_mut()) {
-                *out = if v < 0.0 { alpha * v } else { v };
+                *out = if v < 0.0 { ALPHA.algebraic_mul(v) } else { v };
             }
         }
         Ok(data)
     }
 
-    let output_data = leaky_relu_inner(data, alpha)?;
+    let output_data = leaky_relu_inner(data)?;
     Tensor::create(name, dim.to_vec(), output_data)
 }
 
 #[inline]
-pub fn concat(input_a: &Tensor, input_b: &Tensor, name: &str) -> Result<Tensor> {
+pub fn concat(inputs: &[Tensor], name: &str) -> Result<Tensor> {
     // ESRGAN hardcoded attributes
     // let axis = 1;
-    let a_dims = &input_a.dims;
-    let b_dims = &input_b.dims;
-
-    assert_eq!(
-        a_dims.len(),
-        4,
-        "ESRGAN's concat operation requires rank-4 tensors"
-    );
-    assert_eq!(
-        b_dims.len(),
-        4,
-        "ESRGAN's concat operation requires rank-4 tensors"
-    );
     assert!(
-        a_dims[0] == b_dims[0] && a_dims[2] == b_dims[2] && a_dims[3] == b_dims[3],
-        "ESRGAN's concat operation requires equal N, H, W, got {a_dims:?} and {b_dims:?}"
+        !inputs.is_empty(),
+        "ESRGAN's concat operation requires at least one input"
     );
+    let first_dims = &inputs[0].dims;
+    for t in inputs {
+        let d = &t.dims;
+        assert_eq!(
+            d.len(),
+            4,
+            "ESRGAN's concat operation requires rank-4 tensors"
+        );
+        assert!(
+            d[0] == first_dims[0] && d[2] == first_dims[2] && d[3] == first_dims[3],
+            "ESRGAN's concat operation requires equal N, H, W, got {d:?} and {first_dims:?}"
+        );
+    }
 
-    let n = a_dims[0] as usize;
-    let ca = a_dims[1] as usize;
-    let cb = b_dims[1] as usize;
-    let hw = (a_dims[2] * a_dims[3]) as usize;
+    let n = first_dims[0] as usize;
+    let hw = (first_dims[2] * first_dims[3]) as usize;
+    let cout = inputs.iter().map(|t| t.dims[1]).sum::<i64>();
 
     // since layout is NCHW, every per-batch slab is contiguous, so an axis-1 concat is just
-    // pasting b's slab right after a's slab per batch (2 memcpys per batch)
-    let a_data = &input_a.data;
-    let b_data = &input_b.data;
-    let mut data = Vec::with_capacity(n * (ca + cb) * hw);
+    // pasting every input's slab in order per batch (1 memcpy per input)
+    let mut data = Vec::with_capacity(n * cout as usize * hw);
     for i in 0..n {
-        data.extend_from_slice(&a_data[i * ca * hw..(i + 1) * ca * hw]);
-        data.extend_from_slice(&b_data[i * cb * hw..(i + 1) * cb * hw]);
+        for t in inputs {
+            let c = t.dims[1] as usize;
+            data.extend_from_slice(&t.data[i * c * hw..(i + 1) * c * hw]);
+        }
     }
 
     Tensor::create(
         name,
-        vec![a_dims[0], a_dims[1] + b_dims[1], a_dims[2], a_dims[3]],
+        vec![first_dims[0], cout, first_dims[2], first_dims[3]],
         data,
     )
 }
@@ -365,7 +364,7 @@ pub fn add(input_a: &Tensor, input_b: &Tensor, name: &str) -> Result<Tensor> {
 pub fn mul(input_a: &Tensor, input_b: &Tensor, name: &str) -> Result<Tensor> {
     // ESRGAN's all mul operation are tensor * rank-0 aka scalar
     #[allow(clippy::excessive_precision)]
-    let scalar = 0.20000000298023224;
+    const SCALAR: f32 = 0.20000000298023224;
     let a_dim = &input_a.dims;
     let n = input_a.data.len();
 
@@ -375,7 +374,7 @@ pub fn mul(input_a: &Tensor, input_b: &Tensor, name: &str) -> Result<Tensor> {
     );
     assert_eq!(
         input_b.data.as_ref(),
-        &[scalar],
+        &[SCALAR],
         "ESRGAN's mul operation requires second input to be rank-0 tensor with value 0.20000000298023224"
     );
 
@@ -383,7 +382,7 @@ pub fn mul(input_a: &Tensor, input_b: &Tensor, name: &str) -> Result<Tensor> {
     let data: Vec<f32> = input_a
         .data()
         .iter()
-        .map(|a| a.algebraic_mul(alpha))
+        .map(|a| a.algebraic_mul(SCALAR))
         .collect();
 
     #[cfg(target_arch = "x86_64")]
@@ -394,7 +393,7 @@ pub fn mul(input_a: &Tensor, input_b: &Tensor, name: &str) -> Result<Tensor> {
 
         unsafe {
             let mut i = 0;
-            let scalar_v = _mm256_set1_ps(scalar);
+            let scalar_v = _mm256_set1_ps(SCALAR);
             while i + 32 <= n {
                 let a0 = _mm256_loadu_ps(ap.add(i));
                 let a1 = _mm256_loadu_ps(ap.add(i + 8));
@@ -412,7 +411,7 @@ pub fn mul(input_a: &Tensor, input_b: &Tensor, name: &str) -> Result<Tensor> {
                 i += 8;
             }
             while i < n {
-                *dp.add(i) = *ap.add(i) * scalar;
+                *dp.add(i) = *ap.add(i) * SCALAR;
                 i += 1;
             }
             data.set_len(n);
