@@ -7,17 +7,17 @@ use core::arch::x86_64::*;
 
 pub fn conv(input: &Tensor, weight: &Tensor, bias: &Tensor, name: &str) -> Result<Tensor> {
     // ESRGAN hardcoded attributes
-    let _auto_pad = "NOTSET";
-    let _group = 1;
-    let _dilations = [1, 1];
-    let _pads = [1, 1, 1, 1];
-    let _strides = [1, 1];
+    // let auto_pad = "NOTSET";
+    // let group = 1;
+    // let dilations = [1, 1];
+    // let pads = [1, 1, 1, 1];
+    // let strides = [1, 1];
     todo!()
 }
 
 pub fn leaky_relu(input: &Tensor, name: &str) -> Result<Tensor> {
     // ESRGAN hardcoded attributes
-    const ALPHA: f32 = 0.20000000298023224;
+    let alpha = 0.20000000298023224;
     let data = input.data();
 
     #[cfg(not(target_arch = "x86_64"))]
@@ -86,14 +86,51 @@ pub fn leaky_relu(input: &Tensor, name: &str) -> Result<Tensor> {
         Ok(data)
     }
 
-    let output_data = leaky_relu_inner(data, ALPHA)?;
+    let output_data = leaky_relu_inner(data, alpha)?;
     Tensor::create(name, input.dims().to_vec(), output_data)
 }
 
 pub fn concat(input_a: &Tensor, input_b: &Tensor, name: &str) -> Result<Tensor> {
     // ESRGAN hardcoded attributes
-    let _axis = 1;
-    todo!()
+    // let axis = 1;
+    let a_dims = input_a.dims();
+    let b_dims = input_b.dims();
+
+    assert_eq!(
+        a_dims.len(),
+        4,
+        "ESRGAN's concat operation requires rank-4 tensors"
+    );
+    assert_eq!(
+        b_dims.len(),
+        4,
+        "ESRGAN's concat operation requires rank-4 tensors"
+    );
+    assert!(
+        a_dims[0] == b_dims[0] && a_dims[2] == b_dims[2] && a_dims[3] == b_dims[3],
+        "ESRGAN's concat operation requires equal N, H, W, got {a_dims:?} and {b_dims:?}"
+    );
+
+    let n = a_dims[0] as usize;
+    let ca = a_dims[1] as usize;
+    let cb = b_dims[1] as usize;
+    let hw = (a_dims[2] * a_dims[3]) as usize;
+
+    // In NCHW every per-batch slab is contiguous, so an axis-1 concat is just
+    // pasting b's slab right after a's slab per batch (2 memcpys per batch)
+    let a_data = input_a.data();
+    let b_data = input_b.data();
+    let mut data = Vec::with_capacity(n * (ca + cb) * hw);
+    for i in 0..n {
+        data.extend_from_slice(&a_data[i * ca * hw..(i + 1) * ca * hw]);
+        data.extend_from_slice(&b_data[i * cb * hw..(i + 1) * cb * hw]);
+    }
+
+    Tensor::create(
+        name,
+        vec![a_dims[0], a_dims[1] + b_dims[1], a_dims[2], a_dims[3]],
+        data,
+    )
 }
 
 pub fn add(input_a: &Tensor, input_b: &Tensor, name: &str) -> Result<Tensor> {
@@ -159,11 +196,11 @@ pub fn add(input_a: &Tensor, input_b: &Tensor, name: &str) -> Result<Tensor> {
     // broadcast_op(input_a, input_b, name, |a, b| a.algebraic_add(b))
 }
 
-// ESRGAN's all mul operation are tensor * rank-0 aka scalar
 pub fn mul(input_a: &Tensor, input_b: &Tensor, name: &str) -> Result<Tensor> {
+    // ESRGAN's all mul operation are tensor * rank-0 aka scalar
+    let alpha = 0.20000000298023224;
     let a_dim = input_a.dims();
     let n = input_a.data().len();
-    let alpha = 0.20000000298023224;
 
     assert!(
         input_b.dims().is_empty(),
@@ -220,7 +257,6 @@ pub fn mul(input_a: &Tensor, input_b: &Tensor, name: &str) -> Result<Tensor> {
 }
 
 #[allow(unused)]
-#[inline(always)]
 fn broadcast_op<OP>(x: &Tensor, y: &Tensor, name: &str, op: OP) -> Result<Tensor>
 where
     OP: Fn(f32, f32) -> f32,
@@ -333,15 +369,82 @@ where
     Tensor::create(name, out_dims.to_vec(), data)
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+fn resize_nearest_x2_row(input: &[f32], output: &mut [f32]) {
+    for (x, &v) in input.iter().enumerate() {
+        output[2 * x] = v;
+        output[2 * x + 1] = v;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn resize_nearest_x2_row(input: &[f32], output: &mut [f32]) {
+    debug_assert_eq!(output.len(), input.len() * 2);
+
+    let (input_chunk8, input_rem8) = input.as_chunks::<8>();
+    let (output_chunk16, _) = output.as_chunks_mut::<16>();
+    let dup_low = unsafe { _mm256_setr_epi32(0, 0, 1, 1, 2, 2, 3, 3) };
+    let dup_high = unsafe { _mm256_setr_epi32(4, 4, 5, 5, 6, 6, 7, 7) };
+
+    for (i8, o16) in input_chunk8.iter().zip(output_chunk16.iter_mut()) {
+        unsafe {
+            let v = _mm256_loadu_ps(i8.as_ptr());
+            // [v0 v0 v1 v1 v2 v2 v3 v3] and [v4 v4 v5 v5 v6 v6 v7 v7]
+            let lo = _mm256_permutevar8x32_ps(v, dup_low);
+            let hi = _mm256_permutevar8x32_ps(v, dup_high);
+            _mm256_storeu_ps(o16.as_mut_ptr(), lo);
+            _mm256_storeu_ps(o16.as_mut_ptr().add(8), hi);
+        }
+    }
+
+    let tail = input_chunk8.len() * 16;
+    for (x, &v) in input_rem8.iter().enumerate() {
+        output[tail + 2 * x] = v;
+        output[tail + 2 * x + 1] = v;
+    }
+}
+
 pub fn resize(input: &Tensor, name: &str) -> Result<Tensor> {
     // ESRGAN hardcoded attributes
-    let _antialias = 0;
-    let _coordinate_transformation_mode = "asymmetric";
-    let _cubic_coeff_a = -0.75;
-    let _exclude_outside = 0;
-    let _extrapolation_value = 0;
-    let _keep_aspect_ratio_policy = "stretch";
-    let _mode = "nearest";
-    let _nearest_mode = "floor";
-    todo!()
+    // let _antialias = 0;
+    // let _coordinate_transformation_mode = "asymmetric";
+    // let _cubic_coeff_a = -0.75;
+    // let _exclude_outside = 0;
+    // let _extrapolation_value = 0;
+    // let _keep_aspect_ratio_policy = "stretch";
+    // let _mode = "nearest";
+    // let _nearest_mode = "floor";
+
+    // scales = [1, 1, 2, 2]: both `upsample_nearest2d` nodes upscale x2 (x4 total for the model)
+    // nearest + floor + asymmetric => out(o) = in(o / 2) with integer division
+    let dims = input.dims();
+
+    assert_eq!(
+        dims.len(),
+        4,
+        "ESRGAN's resize operation requires rank-4 tensor"
+    );
+
+    let n = dims[0] as usize;
+    let c = dims[1] as usize;
+    let h = dims[2] as usize;
+    let w = dims[3] as usize;
+    let out_w = w * 2;
+
+    // Each input row expands to a 2W row, which is pasted into output rows 2y and 2y+1
+    // The expanded row stays L1-resident between the two pastes, so
+    // DRAM traffic is exactly: input read once, output written once
+    let input_data = input.data();
+    let mut data = Vec::with_capacity(n * c * h * 4 * w);
+    let mut row_buf = vec![0f32; out_w];
+    for plane in 0..n * c {
+        let in_plane = &input_data[plane * h * w..(plane + 1) * h * w];
+        for in_row in in_plane.chunks_exact(w) {
+            resize_nearest_x2_row(in_row, &mut row_buf);
+            data.extend_from_slice(&row_buf);
+            data.extend_from_slice(&row_buf);
+        }
+    }
+
+    Tensor::create(name, vec![dims[0], dims[1], 2 * dims[2], 2 * dims[3]], data)
 }

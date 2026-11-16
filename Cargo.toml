@@ -3,8 +3,12 @@ name = "esrgan_rs"
 version = "1.0.0"
 edition = "2024"
 
+[lib]
+name = "esrgan_rs"
+path = "src/lib.rs"
+
 [dependencies]
 prost = "0.14.6"
 memmap2 = "0.9.12"
-rayon = "1.12.0"
 anyhow = "1.0.104"
+# rayon = "1.12.0"
