@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct Tensor {
-    name: Arc<str>,
-    dims: Arc<Vec<i64>>,
-    data: Arc<Vec<f32>>,
+    pub name: Arc<str>,
+    pub dims: Arc<Vec<i64>>,
+    pub data: Arc<Vec<f32>>,
 }
 
 impl Tensor {
@@ -28,19 +28,6 @@ impl Tensor {
             data: Arc::new(data),
         })
     }
-    #[inline(always)]
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-    #[inline(always)]
-    pub fn dims(&self) -> &[i64] {
-        self.dims.as_slice()
-    }
-    #[inline(always)]
-    pub fn data(&self) -> &[f32] {
-        self.data.as_slice()
-    }
-    #[inline(always)]
     pub fn strides(&self) -> Vec<usize> {
         let mut strides = vec![1; self.dims.len()];
         for i in (0..self.dims.len() - 1).rev() {
