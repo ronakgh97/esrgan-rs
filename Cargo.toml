@@ -1,12 +1,10 @@
 [package]
 name = "esrgan_rs"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 
 [dependencies]
 prost = "0.14.6"
 memmap2 = "0.9.12"
-# image = "0.25.10"
-# wide = "1.7.1"
-# rayon = "1.12.0"
+rayon = "1.12.0"
 anyhow = "1.0.104"
