@@ -73,14 +73,14 @@ pub fn decode_model(bytes: &[u8]) -> Result<Vec<Tensor>> {
                 })
                 .ok_or_else(|| {
                     anyhow!(
-                        "Tensor '{}': dims {:?} overflow element count",
+                        "tensor '{}': dims {:?} overflow element count",
                         tensor_proto.name,
                         tensor_proto.dims
                     )
                 })?;
             if numel * size_of::<f32>() != tensor_proto.raw_data.len() {
                 return Err(anyhow!(
-                    "Tensor '{}': dims {:?} has {} elements, but raw_data has {} bytes",
+                    "tensor '{}': dims {:?} has {} elements, but raw_data has {} bytes",
                     tensor_proto.name,
                     tensor_proto.dims,
                     numel,
