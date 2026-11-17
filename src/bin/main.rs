@@ -3,7 +3,9 @@ use clap::Parser;
 use esrgan_rs::init_weights_from_file;
 use esrgan_rs::{Tensor, run};
 use image::{GenericImageView, RgbImage};
+use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 
 #[derive(Parser)]
 struct Cli {
@@ -41,9 +43,15 @@ fn main() -> Result<()> {
     // run the inference and upscale each to 512x512,
     // write all tiles to the output image
     println!(
-        "processing {}x{} image, tiled to {}x{}...",
-        w, h, tile_nx, tile_ny
+        "upscaling {}x{} image, to {}x{} output",
+        w,
+        h,
+        w * SCALE_FACTOR,
+        h * SCALE_FACTOR,
     );
+
+    let progress = AtomicU64::new(0);
+    let total_progress = (tile_nx / INPUT_SCALE) * (tile_ny / INPUT_SCALE);
     let input_tile_scale = INPUT_SCALE * INPUT_SCALE;
     let mut tensor_data = vec![0f32; 3 * input_tile_scale];
     for ty in (0..tile_ny).step_by(INPUT_SCALE) {
@@ -76,10 +84,13 @@ fn main() -> Result<()> {
             let output = run(&input_tensor)?;
             let upscaled = output.data();
 
-            println!(
-                "processed tile ({}, {})",
-                tx / INPUT_SCALE,
-                ty / INPUT_SCALE
+            progress.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+            std::io::stdout().flush()?;
+            print!(
+                "\rprogressing: {}/{} tiles processed",
+                progress.load(std::sync::atomic::Ordering::Relaxed),
+                total_progress
             );
 
             // extract the red, green, and blue planes from the upscaled output tile
@@ -121,6 +132,8 @@ fn main() -> Result<()> {
         }
     }
 
+    println!();
+    println!("finished processing all tiles");
     out_img.save(&args.output)?;
 
     Ok(())

@@ -1,4 +1,4 @@
-**esrgan-rs** - running OG ESRGAN using pure rust on CPU (AVX2 accelerated + fallback) and no python, no torch or cuda.
+**esrgan_rs** - running OG ESRGAN using pure rust on CPU (AVX2 accelerated + fallback) and no python, no torch or cuda.
 
 The [model](https://aihub.qualcomm.com/compute/models/esrgan) used is from Qualcomm AI Hub as .onnx format.
 
@@ -22,6 +22,10 @@ The project contains only three files (690 loc):
 - [tensor](src/tensor.rs) - basic tensor utilities
 
 > NOTE: Other models or similar variants from different sources from the internet may fail, as the code is hardcoded.
+
+| Input                             | Output                             |
+|-----------------------------------|------------------------------------|
+| <img src="input.png" width="512"> | <img src="output.png" width="512"> |
 
 ---
 

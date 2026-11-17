@@ -1,10 +1,8 @@
 use crate::kernels::*;
 pub use crate::tensor::*;
 use anyhow::{Result, anyhow};
-use memmap2::Mmap;
 use prost::Message;
 use std::collections::HashMap;
-use std::fs::File;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
@@ -34,9 +32,29 @@ struct TensorProto {
     #[prost(bytes = "vec", tag = "9")]
     raw_data: Vec<u8>,
 }
-static WEIGHTS: OnceLock<HashMap<String, Tensor>> = OnceLock::new();
 
+static WEIGHTS: OnceLock<HashMap<String, Tensor>> = OnceLock::new();
 fn decode_model(bytes: &[u8]) -> Result<HashMap<String, Tensor>> {
+    {
+        use sha2::Digest;
+
+        const CHECKSUM: &str = "5a365f595282abe413e80a77fc58d0b00064c61fa55c9740cfc3d6c1ac0c5a4f";
+        let mut hasher = sha2::Sha256::new();
+
+        let (chunk_f, chunk_l) = bytes.as_chunks::<4096>();
+        for c in chunk_f {
+            hasher.update(c);
+        }
+        hasher.update(chunk_l);
+
+        let checksum = hex::encode(hasher.finalize().as_slice());
+        if CHECKSUM != checksum {
+            return Err(anyhow!(
+                "model checksum mismatch, expected {CHECKSUM}, got {checksum}"
+            ));
+        }
+    }
+
     let model = ModelProto::decode(bytes)?;
     let graph = model
         .graph
@@ -84,7 +102,7 @@ fn decode_model(bytes: &[u8]) -> Result<HashMap<String, Tensor>> {
 }
 
 pub fn init_weights_from_file(path: impl AsRef<Path>) -> Result<()> {
-    let mmap = unsafe { Mmap::map(&File::open(path.as_ref())?)? };
+    let mmap = unsafe { memmap2::Mmap::map(&std::fs::File::open(path.as_ref())?)? };
     let weights = decode_model(&mmap[..])?;
     WEIGHTS
         .set(weights)
