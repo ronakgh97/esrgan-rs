@@ -1,5 +1,5 @@
 use crate::kernels::*;
-use crate::tensor::*;
+pub use crate::tensor::*;
 use anyhow::{Result, anyhow};
 use memmap2::Mmap;
 use prost::Message;
@@ -256,9 +256,36 @@ pub fn run(input: &Tensor) -> Result<Tensor> {
 }
 
 #[test]
-fn test_init_weights() -> Result<()> {
-    init_weights_from_file("esrgan-onnx-float/esrgan_single.onnx")?;
-    let weights = get_weights()?;
+fn test_init_weights() {
+    init_weights_from_file("esrgan-onnx-float/esrgan_single.onnx").unwrap();
+    let weights = get_weights().unwrap();
     assert_eq!(weights.len(), 704);
-    Ok(())
+}
+
+#[test]
+fn test_image_upscale() {
+    init_weights_from_file("esrgan-onnx-float/esrgan_single.onnx").unwrap();
+    let _ = get_weights().unwrap();
+
+    let width = 128;
+    let height = 128;
+    let plane = width * height;
+    let mut data = vec![0f32; 3 * plane];
+    let in_image = image::open("input.png").unwrap().to_rgb8();
+    for y in 0..height {
+        for x in 0..width {
+            let pixel = in_image.get_pixel(x as u32, y as u32);
+            let r = pixel[0] as f32 / 255.0;
+            let g = pixel[1] as f32 / 255.0;
+            let b = pixel[2] as f32 / 255.0;
+            data[(y * width + x) * 3] = r;
+            data[(y * width + x) * 3 + 1] = g;
+            data[(y * width + x) * 3 + 2] = b;
+        }
+    }
+
+    // run inference
+    let input = Tensor::create("inputs", vec![1, 3, 128, 128], data).unwrap();
+    let output = run(&input).unwrap();
+    assert_eq!(output.dims(), &[1, 3, 512, 512]);
 }

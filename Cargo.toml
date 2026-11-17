@@ -7,8 +7,22 @@ edition = "2024"
 name = "esrgan_rs"
 path = "src/lib.rs"
 
+[profile.dev]
+opt-level = 1
+lto = false
+debug = "full"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "fat"
+debug = false
+
 [dependencies]
+clap = { version = "4.6.8", features = ["derive"] }
+image = "0.25.10"
+anyhow = "1.0.104"
+
 prost = "0.14.6"
 memmap2 = "0.9.12"
 rayon = "1.12.0"
-anyhow = "1.0.104"
