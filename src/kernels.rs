@@ -169,17 +169,12 @@ pub fn conv(input: &Tensor, weight: &Tensor, bias: &Tensor, name: &str) -> Resul
 }
 
 #[inline]
-pub fn leaky_relu(input: &Tensor, alpha: f32, name: &str) -> Result<Tensor> {
+pub fn leaky_relu(input: &Tensor, name: &str) -> Result<Tensor> {
     // ESRGAN hardcoded attributes
     #[allow(clippy::excessive_precision)]
     const ALPHA: f32 = 0.20000000298023224;
     let data = &input.data;
     let dim = &input.dims;
-
-    assert_eq!(
-        alpha, ALPHA,
-        "ESRGAN's leaky_relu operation requires alpha=0.2"
-    );
 
     #[inline(always)]
     #[cfg(not(target_arch = "x86_64"))]
@@ -254,7 +249,7 @@ pub fn leaky_relu(input: &Tensor, alpha: f32, name: &str) -> Result<Tensor> {
 }
 
 #[inline]
-pub fn concat(inputs: &[Tensor], name: &str) -> Result<Tensor> {
+pub fn concat(inputs: &[&Tensor], name: &str) -> Result<Tensor> {
     // ESRGAN hardcoded attributes
     // let axis = 1;
     assert!(
