@@ -7,6 +7,10 @@ edition = "2024"
 name = "esrgan_rs"
 path = "src/lib.rs"
 
+[[bin]]
+name = "esrgan"
+path = "src/bin/main.rs"
+
 [profile.dev]
 opt-level = 1
 lto = "off"
@@ -25,5 +29,6 @@ anyhow = "1.0.104"
 prost = "0.14.6"
 memmap2 = "0.9.12"
 rayon = "1.12.0"
+rustc-hash = "2.1.3"
 sha2 = "0.11.1"
 hex = "0.4.3"

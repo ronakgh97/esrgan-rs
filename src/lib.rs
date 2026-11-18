@@ -2,9 +2,9 @@ use crate::kernels::*;
 pub use crate::tensor::*;
 use anyhow::{Result, anyhow};
 use prost::Message;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 mod kernels;
 mod tensor;
@@ -33,8 +33,8 @@ struct TensorProto {
     raw_data: Vec<u8>,
 }
 
-static WEIGHTS: OnceLock<HashMap<String, Tensor>> = OnceLock::new();
-fn decode_model(bytes: &[u8]) -> Result<HashMap<String, Tensor>> {
+static WEIGHTS: OnceLock<FxHashMap<String, Tensor>> = OnceLock::new();
+fn decode_model(bytes: &[u8]) -> Result<FxHashMap<String, Tensor>> {
     {
         use sha2::Digest;
 
@@ -61,7 +61,7 @@ fn decode_model(bytes: &[u8]) -> Result<HashMap<String, Tensor>> {
         .ok_or_else(|| anyhow!("graph is missing from protobuf file"))?;
 
     // ESRGAN has exact 704 initializers
-    let mut tensors = HashMap::with_capacity(704);
+    let mut tensors = FxHashMap::with_capacity_and_hasher(704, Default::default());
     for tensor_proto in graph.initializer {
         let tensor_data = if !tensor_proto.raw_data.is_empty() {
             let numel: usize = tensor_proto
@@ -110,22 +110,19 @@ pub fn init_weights_from_file(path: impl AsRef<Path>) -> Result<()> {
     Ok(())
 }
 
-pub fn init_weights_from_bytes(bytes: &Arc<[u8]>) -> Result<()> {
-    let weights = decode_model(bytes)?;
+pub fn init_weights_from_bytes(bytes: impl AsRef<[u8]>) -> Result<()> {
+    let weights = decode_model(bytes.as_ref())?;
     WEIGHTS
         .set(weights)
         .map_err(|_| anyhow!("failed to init weights"))?;
     Ok(())
 }
 
-pub fn get_weights() -> Result<&'static HashMap<String, Tensor>> {
-    WEIGHTS
-        .get()
-        .ok_or_else(|| anyhow!("weights not initialized"))
-}
-
 pub fn run(input: &Tensor) -> Result<Tensor> {
-    let weights = get_weights()?;
+    let weights = WEIGHTS
+        .get()
+        .ok_or_else(|| anyhow!("weights not initialized"))?;
+
     let w = |name: &str| -> Result<&Tensor> {
         weights
             .get(name)
@@ -276,14 +273,13 @@ pub fn run(input: &Tensor) -> Result<Tensor> {
 #[test]
 fn test_init_weights() {
     init_weights_from_file("esrgan-onnx-float/esrgan_single.onnx").unwrap();
-    let weights = get_weights().unwrap();
+    let weights = WEIGHTS.get().unwrap();
     assert_eq!(weights.len(), 704);
 }
 
 #[test]
 fn test_image_upscale() {
     init_weights_from_file("esrgan-onnx-float/esrgan_single.onnx").unwrap();
-    let _ = get_weights().unwrap();
 
     let width = 128;
     let height = 128;

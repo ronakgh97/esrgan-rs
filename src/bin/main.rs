@@ -1,22 +1,32 @@
 use anyhow::Result;
 use clap::Parser;
-use esrgan_rs::init_weights_from_file;
-use esrgan_rs::{Tensor, run};
+use esrgan_rs::{Tensor, init_weights_from_bytes, run};
 use image::{GenericImageView, RgbImage};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 
 #[derive(Parser)]
+#[command(
+    name = "esrgan",
+    author = "ronakgh97 <ronakgh97@gmail.com>",
+    version = "v1.0.0",
+    about = "AI Upscaler using Original ESRGAN model",
+    long_about = "AI Upscaler using Original ESRGAN model"
+)]
 struct Cli {
+    /// Input image path
     #[arg(short, long)]
     input: PathBuf,
+    /// Output image path
     #[arg(short, long)]
     output: PathBuf,
 }
 
+const WEIGHT_BYTES: &[u8] = include_bytes!("../../esrgan-onnx-float/esrgan_single.onnx");
+
 fn main() -> Result<()> {
-    init_weights_from_file("esrgan-onnx-float/esrgan_single.onnx")?;
+    init_weights_from_bytes(WEIGHT_BYTES)?;
 
     let args = Cli::parse();
     let in_img = image::ImageReader::open(&args.input)?
@@ -50,6 +60,7 @@ fn main() -> Result<()> {
         h * SCALE_FACTOR,
     );
 
+    let start = std::time::Instant::now();
     let progress = AtomicU64::new(0);
     let total_progress = (tile_nx / INPUT_SCALE) * (tile_ny / INPUT_SCALE);
     let input_tile_scale = INPUT_SCALE * INPUT_SCALE;
@@ -133,7 +144,10 @@ fn main() -> Result<()> {
     }
 
     println!();
-    println!("finished processing all tiles");
+    println!(
+        "finished processing all tiles, took {:.2}s",
+        start.elapsed().as_secs_f32()
+    );
     out_img.save(&args.output)?;
 
     Ok(())
