@@ -1,4 +1,4 @@
-**esrgan_rs** - running OG ESRGAN using pure rust on CPU (AVX2 accelerated + fallback) with no python, no torch or cuda.
+**esrgan-rs** - running OG ESRGAN using pure rust on CPU (AVX2 accelerated + fallback) with no python, no torch or cuda.
 
 The [model](https://aihub.qualcomm.com/compute/models/esrgan) used is from Qualcomm AI Hub as `.onnx` format.
 
@@ -31,14 +31,14 @@ The project contains only three files (690 loc):
 esrgan --input input.png --output output_x4.png
 upscaling 128x128 image, to 512x512 output
 progressing: 1/1 tiles processed
-finished processing all tiles, took 3.04s
+finished processing all tiles, took 3.10s
 
 esrgan --input output_x4.png --output output_x8.png
 upscaling 512x512 image, to 2048x2048 output
 progressing: 16/16 tiles processed
-finished processing all tiles, took 52.14s 😭
+finished processing all tiles, took 51.20s
 ```
 
 ---
 
-Checkout my other [project](https://github.com/ronakgh97/onnx_rs) about minimal onnx-runtime in pure rust
+Checkout my other [project](https://github.com/ronakgh97/onnx-rs) about minimal onnx-runtime in pure rust

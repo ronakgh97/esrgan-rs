@@ -1,12 +1,19 @@
 use crate::tensor::Tensor;
 use anyhow::Result;
 use rayon::prelude::*;
+use std::sync::Arc;
 
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::*;
 
 #[inline]
-pub fn conv(input: &Tensor, weight: &Tensor, bias: &Tensor, name: &str) -> Result<Tensor> {
+pub fn conv(
+    input: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+    output: &mut Tensor,
+    apply_leaky: bool,
+) -> Result<()> {
     // ESRGAN hardcoded attributes
     // let auto_pad = "NOTSET";
     // let group = 1;
@@ -97,6 +104,61 @@ pub fn conv(input: &Tensor, weight: &Tensor, bias: &Tensor, name: &str) -> Resul
         }
     }
 
+    #[allow(clippy::excessive_precision)]
+    const ALPHA: f32 = 0.20000000298023224;
+
+    #[inline(always)]
+    #[cfg(not(target_arch = "x86_64"))]
+    fn leaky_in_place(row: &mut [f32], alpha: f32) {
+        for v in row.iter_mut() {
+            if *v < 0.0 {
+                *v = alpha.algebraic_mul(*v);
+            }
+        }
+    }
+    #[inline(always)]
+    #[cfg(target_arch = "x86_64")]
+    fn leaky_in_place(row: &mut [f32], alpha: f32) {
+        unsafe {
+            let zero = _mm256_setzero_ps();
+            let va = _mm256_set1_ps(alpha);
+            let p = row.as_mut_ptr();
+            let mut x = 0usize;
+            let n = row.len();
+            while x + 32 <= n {
+                let v0 = _mm256_loadu_ps(p.add(x));
+                let v1 = _mm256_loadu_ps(p.add(x + 8));
+                let v2 = _mm256_loadu_ps(p.add(x + 16));
+                let v3 = _mm256_loadu_ps(p.add(x + 24));
+                let a0 = _mm256_mul_ps(v0, va);
+                let a1 = _mm256_mul_ps(v1, va);
+                let a2 = _mm256_mul_ps(v2, va);
+                let a3 = _mm256_mul_ps(v3, va);
+                let m0 = _mm256_cmp_ps(v0, zero, _CMP_LT_OQ);
+                let m1 = _mm256_cmp_ps(v1, zero, _CMP_LT_OQ);
+                let m2 = _mm256_cmp_ps(v2, zero, _CMP_LT_OQ);
+                let m3 = _mm256_cmp_ps(v3, zero, _CMP_LT_OQ);
+                _mm256_storeu_ps(p.add(x), _mm256_blendv_ps(v0, a0, m0));
+                _mm256_storeu_ps(p.add(x + 8), _mm256_blendv_ps(v1, a1, m1));
+                _mm256_storeu_ps(p.add(x + 16), _mm256_blendv_ps(v2, a2, m2));
+                _mm256_storeu_ps(p.add(x + 24), _mm256_blendv_ps(v3, a3, m3));
+                x += 32;
+            }
+            while x + 8 <= n {
+                let v = _mm256_loadu_ps(p.add(x));
+                let a = _mm256_mul_ps(v, va);
+                let m = _mm256_cmp_ps(v, zero, _CMP_LT_OQ);
+                _mm256_storeu_ps(p.add(x), _mm256_blendv_ps(v, a, m));
+                x += 8;
+            }
+            while x < n {
+                let v = *p.add(x);
+                *p.add(x) = if v < 0.0 { alpha * v } else { v };
+                x += 1;
+            }
+        }
+    }
+
     let n = in_dims[0] as usize;
     let cin = in_dims[1] as usize;
     let h = in_dims[2] as usize;
@@ -130,8 +192,12 @@ pub fn conv(input: &Tensor, weight: &Tensor, bias: &Tensor, name: &str) -> Resul
     }
     let r = h / bands;
 
-    let mut data = vec![0f32; n * cout * h * w];
-    data.par_chunks_mut(r * w)
+    // write into the caller's buffer, no allocation inside conv
+    let out_data = Arc::make_mut(&mut output.data);
+    out_data.resize(n * cout * h * w, 0f32);
+
+    out_data
+        .par_chunks_mut(r * w)
         .enumerate()
         .for_each(|(idx, out_band)| {
             let n_i = idx / (cout * bands);
@@ -158,17 +224,20 @@ pub fn conv(input: &Tensor, weight: &Tensor, bias: &Tensor, name: &str) -> Resul
                         }
                     }
                 }
+                // fuse leaky_relu into conv, apply in-place to the just-written row
+                // instead of a separate conv-write + leaky-read + leaky-write pass
+                if apply_leaky {
+                    leaky_in_place(out_row, ALPHA);
+                }
             }
         });
 
-    Tensor::create(
-        name,
-        vec![in_dims[0], w_dims[0], in_dims[2], in_dims[3]],
-        data,
-    )
+    output.dims = Arc::new(vec![in_dims[0], w_dims[0], in_dims[2], in_dims[3]]);
+    Ok(())
 }
 
 #[inline]
+#[allow(unused)]
 pub fn leaky_relu(input: &Tensor, name: &str) -> Result<Tensor> {
     // ESRGAN hardcoded attributes
     #[allow(clippy::excessive_precision)]

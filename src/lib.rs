@@ -129,6 +129,21 @@ pub fn run(input: &Tensor) -> Result<Tensor> {
             .ok_or_else(|| anyhow!("weight '{name}' not found"))
     };
 
+    // allocate an output buffer for a conv given its input + weight dims
+    let conv_out = |input: &Tensor, weight: &Tensor, name: &str| -> Result<Tensor> {
+        let in_dims = &input.dims;
+        let w_dims = &weight.dims;
+        let n = in_dims[0] as usize;
+        let cout = w_dims[0] as usize;
+        let h = in_dims[2] as usize;
+        let wdt = in_dims[3] as usize;
+        Tensor::create(
+            name,
+            vec![n as i64, cout as i64, h as i64, wdt as i64],
+            vec![0f32; n * cout * h * wdt],
+        )
+    };
+
     // one RDB: 4 dense leaky convs with concat growth 64→96→128→160→192,
     // then conv5 (no leaky) and a PLAIN residual add
     let rdb = |x: &Tensor, block: usize, rdb_idx: usize| -> Result<Tensor> {
@@ -136,59 +151,37 @@ pub fn run(input: &Tensor) -> Result<Tensor> {
         // conv5 weights are in form of val_{7+6k} / val_{8+6k}
         let k = block * 3 + rdb_idx;
 
-        let c1 = leaky_relu(
-            &conv(
-                x,
-                w(&format!("model.RRDB_trunk.{block}.RDB{r}.conv1.weight"))?,
-                w(&format!("model.RRDB_trunk.{block}.RDB{r}.conv1.bias"))?,
-                &format!("rrdb{block}_rdb{r}_conv1"),
-            )?,
-            &format!("rrdb{block}_rdb{r}_l1"),
-        )?;
+        let w1 = w(&format!("model.RRDB_trunk.{block}.RDB{r}.conv1.weight"))?;
+        let b1 = w(&format!("model.RRDB_trunk.{block}.RDB{r}.conv1.bias"))?;
+        let mut c1 = conv_out(x, w1, &format!("rrdb{block}_rdb{r}_conv1"))?;
+        conv(x, w1, b1, &mut c1, true)?;
         let cat1 = concat(&[x, &c1], &format!("rrdb{block}_rdb{r}_cat1"))?; // 64+32=96
 
-        let c2 = leaky_relu(
-            &conv(
-                &cat1,
-                w(&format!("model.RRDB_trunk.{block}.RDB{r}.conv2.weight"))?,
-                w(&format!("model.RRDB_trunk.{block}.RDB{r}.conv2.bias"))?,
-                &format!("rrdb{block}_rdb{r}_conv2"),
-            )?,
-            &format!("rrdb{block}_rdb{r}_l2"),
-        )?;
+        let w2 = w(&format!("model.RRDB_trunk.{block}.RDB{r}.conv2.weight"))?;
+        let b2 = w(&format!("model.RRDB_trunk.{block}.RDB{r}.conv2.bias"))?;
+        let mut c2 = conv_out(&cat1, w2, &format!("rrdb{block}_rdb{r}_conv2"))?;
+        conv(&cat1, w2, b2, &mut c2, true)?;
         let cat2 = concat(&[x, &c1, &c2], &format!("rrdb{block}_rdb{r}_cat2"))?; // 64+32+32=128
 
-        let c3 = leaky_relu(
-            &conv(
-                &cat2,
-                w(&format!("model.RRDB_trunk.{block}.RDB{r}.conv3.weight"))?,
-                w(&format!("model.RRDB_trunk.{block}.RDB{r}.conv3.bias"))?,
-                &format!("rrdb{block}_rdb{r}_conv3"),
-            )?,
-            &format!("rrdb{block}_rdb{r}_l3"),
-        )?;
+        let w3 = w(&format!("model.RRDB_trunk.{block}.RDB{r}.conv3.weight"))?;
+        let b3 = w(&format!("model.RRDB_trunk.{block}.RDB{r}.conv3.bias"))?;
+        let mut c3 = conv_out(&cat2, w3, &format!("rrdb{block}_rdb{r}_conv3"))?;
+        conv(&cat2, w3, b3, &mut c3, true)?;
         let cat3 = concat(&[x, &c1, &c2, &c3], &format!("rrdb{block}_rdb{r}_cat3"))?; // 64+32*3=160
 
-        let c4 = leaky_relu(
-            &conv(
-                &cat3,
-                w(&format!("model.RRDB_trunk.{block}.RDB{r}.conv4.weight"))?,
-                w(&format!("model.RRDB_trunk.{block}.RDB{r}.conv4.bias"))?,
-                &format!("rrdb{block}_rdb{r}_conv4"),
-            )?,
-            &format!("rrdb{block}_rdb{r}_l4"),
-        )?;
+        let w4 = w(&format!("model.RRDB_trunk.{block}.RDB{r}.conv4.weight"))?;
+        let b4 = w(&format!("model.RRDB_trunk.{block}.RDB{r}.conv4.bias"))?;
+        let mut c4 = conv_out(&cat3, w4, &format!("rrdb{block}_rdb{r}_conv4"))?;
+        conv(&cat3, w4, b4, &mut c4, true)?;
         let cat4 = concat(
             &[x, &c1, &c2, &c3, &c4],
             &format!("rrdb{block}_rdb{r}_cat4"),
         )?; // 64+32*4=192
 
-        let c5 = conv(
-            &cat4,
-            w(&format!("val_{}", 7 + 6 * k))?,
-            w(&format!("val_{}", 8 + 6 * k))?,
-            &format!("rrdb{block}_rdb{r}_conv5"),
-        )?;
+        let w5 = w(&format!("val_{}", 7 + 6 * k))?;
+        let b5 = w(&format!("val_{}", 8 + 6 * k))?;
+        let mut c5 = conv_out(&cat4, w5, &format!("rrdb{block}_rdb{r}_conv5"))?;
+        conv(&cat4, w5, b5, &mut c5, false)?;
 
         // residual add(conv5_out, rdb_in) in the end, no leaky
         add(&c5, x, &format!("rrdb{block}_rdb{r}_add"))
@@ -204,12 +197,10 @@ pub fn run(input: &Tensor) -> Result<Tensor> {
     };
 
     // first_conv
-    let first = conv(
-        input,
-        w("model.conv_first.weight")?,
-        w("model.conv_first.bias")?,
-        "conv_first",
-    )?;
+    let wf = w("model.conv_first.weight")?;
+    let bf = w("model.conv_first.bias")?;
+    let mut first = conv_out(input, wf, "conv_first")?;
+    conv(input, wf, bf, &mut first, false)?;
 
     // ESRGAN has 23 RRDB blocks
     let mut x = rrdb_block(&first, 0)?;
@@ -219,54 +210,39 @@ pub fn run(input: &Tensor) -> Result<Tensor> {
 
     // end conv after RRDB blocks
     // out = trunk_conv(trunk_out) + first
-    let trunk = conv(
-        &x,
-        w("model.trunk_conv.weight")?,
-        w("model.trunk_conv.bias")?,
-        "trunk_conv",
-    )?;
+    let wt = w("model.trunk_conv.weight")?;
+    let bt = w("model.trunk_conv.bias")?;
+    let mut trunk = conv_out(&x, wt, "trunk_conv")?;
+    conv(&x, wt, bt, &mut trunk, false)?;
     x = add(&trunk, &first, "trunk_add")?;
 
     // two upscaling, (nearest, [1,1,2,2]) -> conv -> leaky
 
     x = resize(&x, w("val_1")?, "upsample1")?;
-    x = leaky_relu(
-        &conv(
-            &x,
-            w("model.upconv1.weight")?,
-            w("model.upconv1.bias")?,
-            "upconv1",
-        )?,
-        "upconv1_l",
-    )?;
+    let wu1 = w("model.upconv1.weight")?;
+    let bu1 = w("model.upconv1.bias")?;
+    let mut up1 = conv_out(&x, wu1, "upconv1")?;
+    conv(&x, wu1, bu1, &mut up1, true)?;
+    x = up1;
+
     x = resize(&x, w("val_1")?, "upsample2")?;
+    let wu2 = w("model.upconv2.weight")?;
+    let bu2 = w("model.upconv2.bias")?;
+    let mut up2 = conv_out(&x, wu2, "upconv2")?;
+    conv(&x, wu2, bu2, &mut up2, true)?;
+    x = up2;
 
     // last two leaky convs, then conv_last (no leaky) for final output
-    x = leaky_relu(
-        &conv(
-            &x,
-            w("model.upconv2.weight")?,
-            w("model.upconv2.bias")?,
-            "upconv2",
-        )?,
-        "upconv2_l",
-    )?;
-    x = leaky_relu(
-        &conv(
-            &x,
-            w("model.HRconv.weight")?,
-            w("model.HRconv.bias")?,
-            "HRconv",
-        )?,
-        "HRconv_l",
-    )?;
+    let wh = w("model.HRconv.weight")?;
+    let bh = w("model.HRconv.bias")?;
+    let mut hr = conv_out(&x, wh, "HRconv")?;
+    conv(&x, wh, bh, &mut hr, true)?;
+    x = hr;
 
-    let output = conv(
-        &x,
-        w("model.conv_last.weight")?,
-        w("model.conv_last.bias")?,
-        "conv_last",
-    )?;
+    let wl = w("model.conv_last.weight")?;
+    let bl = w("model.conv_last.bias")?;
+    let mut output = conv_out(&x, wl, "conv_last")?;
+    conv(&x, wl, bl, &mut output, false)?;
     Ok(output)
 }
 
