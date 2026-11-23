@@ -9,32 +9,30 @@ use std::sync::OnceLock;
 mod kernels;
 mod tensor;
 
-#[derive(Clone, PartialEq, Message)]
-struct ModelProto {
-    #[prost(message, optional, tag = "7")]
-    graph: Option<GraphProto>,
-}
-
-#[derive(Clone, PartialEq, Message)]
-struct GraphProto {
-    #[prost(message, repeated, tag = "5")]
-    initializer: Vec<TensorProto>,
-}
-
-#[derive(Clone, PartialEq, Message)]
-struct TensorProto {
-    #[prost(string, tag = "8")]
-    name: String,
-    #[prost(int64, repeated, tag = "1")]
-    dims: Vec<i64>,
-    #[prost(float, repeated, tag = "4")]
-    float_data: Vec<f32>,
-    #[prost(bytes = "vec", tag = "9")]
-    raw_data: Vec<u8>,
-}
-
-static WEIGHTS: OnceLock<FxHashMap<String, Tensor>> = OnceLock::new();
+static INITIALIZERS: OnceLock<FxHashMap<String, Tensor>> = OnceLock::new();
 fn decode_model(bytes: &[u8]) -> Result<FxHashMap<String, Tensor>> {
+    #[derive(Clone, PartialEq, Message)]
+    struct ModelProto {
+        #[prost(message, optional, tag = "7")]
+        graph: Option<GraphProto>,
+    }
+    #[derive(Clone, PartialEq, Message)]
+    struct GraphProto {
+        #[prost(message, repeated, tag = "5")]
+        initializer: Vec<TensorProto>,
+    }
+    #[derive(Clone, PartialEq, Message)]
+    struct TensorProto {
+        #[prost(string, tag = "8")]
+        name: String,
+        #[prost(int64, repeated, tag = "1")]
+        dims: Vec<i64>,
+        #[prost(float, repeated, tag = "4")]
+        float_data: Vec<f32>,
+        #[prost(bytes = "vec", tag = "9")]
+        raw_data: Vec<u8>,
+    }
+
     {
         use sha2::Digest;
 
@@ -101,25 +99,25 @@ fn decode_model(bytes: &[u8]) -> Result<FxHashMap<String, Tensor>> {
     Ok(tensors)
 }
 
-pub fn init_weights_from_file(path: impl AsRef<Path>) -> Result<()> {
+pub fn load_model_from_file(path: impl AsRef<Path>) -> Result<()> {
     let mmap = unsafe { memmap2::Mmap::map(&std::fs::File::open(path.as_ref())?)? };
     let weights = decode_model(&mmap[..])?;
-    WEIGHTS
+    INITIALIZERS
         .set(weights)
         .map_err(|_| anyhow!("failed to init weights"))?;
     Ok(())
 }
 
-pub fn init_weights_from_bytes(bytes: impl AsRef<[u8]>) -> Result<()> {
+pub fn load_model_from_bytes(bytes: impl AsRef<[u8]>) -> Result<()> {
     let weights = decode_model(bytes.as_ref())?;
-    WEIGHTS
+    INITIALIZERS
         .set(weights)
         .map_err(|_| anyhow!("failed to init weights"))?;
     Ok(())
 }
 
 pub fn run(input: &Tensor) -> Result<Tensor> {
-    let weights = WEIGHTS
+    let weights = INITIALIZERS
         .get()
         .ok_or_else(|| anyhow!("weights not initialized"))?;
 
@@ -247,15 +245,15 @@ pub fn run(input: &Tensor) -> Result<Tensor> {
 }
 
 #[test]
-fn test_init_weights() {
-    init_weights_from_file("esrgan-onnx-float/esrgan_single.onnx").unwrap();
-    let weights = WEIGHTS.get().unwrap();
+fn test_load_model() {
+    load_model_from_file("esrgan-onnx-float/esrgan_single.onnx").unwrap();
+    let weights = INITIALIZERS.get().unwrap();
     assert_eq!(weights.len(), 704);
 }
 
 #[test]
 fn test_image_upscale() {
-    init_weights_from_file("esrgan-onnx-float/esrgan_single.onnx").unwrap();
+    load_model_from_file("esrgan-onnx-float/esrgan_single.onnx").unwrap();
 
     let width = 128;
     let height = 128;

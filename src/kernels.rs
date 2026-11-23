@@ -190,7 +190,7 @@ pub fn conv(
     while !h.is_multiple_of(bands) {
         bands -= 1;
     }
-    let r = h / bands;
+    let r = h.div_ceil(bands);
 
     // write into the caller's buffer, no allocation inside conv
     let out_data = Arc::make_mut(&mut output.data);

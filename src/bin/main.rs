@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use esrgan_rs::{Tensor, init_weights_from_bytes, run};
+use esrgan_rs::{Tensor, load_model_from_bytes, run};
 use image::{GenericImageView, RgbImage};
 use std::io::Write;
 use std::path::PathBuf;
@@ -26,7 +26,7 @@ struct Cli {
 const WEIGHT_BYTES: &[u8] = include_bytes!("../../esrgan-onnx-float/esrgan_single.onnx");
 
 fn main() -> Result<()> {
-    init_weights_from_bytes(WEIGHT_BYTES)?;
+    load_model_from_bytes(WEIGHT_BYTES)?;
 
     let args = Cli::parse();
     let in_img = image::ImageReader::open(&args.input)?
