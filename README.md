@@ -31,14 +31,14 @@ The project contains only three files (690 loc):
 esrgan --input input.png --output output_x4.png
 upscaling 128x128 image, to 512x512 output
 progressing: 1/1 tiles processed
-finished processing all tiles, took 2.97s
+finished processing all tiles, took 3.06s
 
 esrgan --input output_x4.png --output output_x8.png
 upscaling 512x512 image, to 2048x2048 output
 progressing: 16/16 tiles processed
-finished processing all tiles, took 48.27s
+finished processing all tiles, took 46.97s
 ```
 
 ---
 
-Checkout my other [project](https://github.com/ronakgh97/onnx-rs) about minimal onnx-runtime in pure rust
+Checkout my other [project](https://github.com/ronakgh97/onnx-rs) - minimal onnx-runtime in pure rust

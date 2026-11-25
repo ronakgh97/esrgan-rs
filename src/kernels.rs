@@ -1,3 +1,4 @@
+use crate::GLOBAL_THREAD_POOL;
 use crate::tensor::Tensor;
 use anyhow::Result;
 use rayon::prelude::*;
@@ -98,7 +99,7 @@ pub fn conv(
                 x += 8;
             }
             while x < n {
-                *op.add(x) += k * *ip.add(x);
+                *op.add(x) += k.algebraic_mul(*ip.add(x));
                 x += 1;
             }
         }
@@ -153,7 +154,7 @@ pub fn conv(
             }
             while x < n {
                 let v = *p.add(x);
-                *p.add(x) = if v < 0.0 { alpha * v } else { v };
+                *p.add(x) = if v < 0.0 { alpha.algebraic_mul(v) } else { v };
                 x += 1;
             }
         }
@@ -169,68 +170,104 @@ pub fn conv(
     let weight_data = &weight.data;
     let bias_data = &bias.data;
 
-    // zero-padding into [n, cin, h+2, w+2] once, so every kernel tap is always
-    // in-bounds and the hot loop stays branch-free
+    // One task owns a band of output rows across ALL output channels. A task
+    // reuses one small padded input band for every output channel, instead of
+    // re-reading the whole input once per output channel. In NCHW a band's rows
+    // are scattered across cout planes, so tasks index the output via raw
+    // pointers (each task writes rows no other task touches).
+    let mut r = h.min(2);
+    while r > 1 && !h.is_multiple_of(r) {
+        r -= 1;
+    }
+    let bands = h / r;
     let pw = w + 2;
-    let ph = h + 2;
-    let mut padded = vec![0f32; n * cin * ph * pw];
-    for plane in 0..n * cin {
-        let src = &in_data[plane * h * w..(plane + 1) * h * w];
-        let dst = &mut padded[plane * ph * pw..(plane + 1) * ph * pw];
-        for y in 0..h {
-            dst[(y + 1) * pw + 1..(y + 1) * pw + 1 + w].copy_from_slice(&src[y * w..(y + 1) * w]);
-        }
-    }
+    let scratch_len = cin * (r + 2) * pw;
 
-    // parallelize over horizontal bands, so every task computes ALL output channels
-    // for its rows, reading its input band from the padded buffer,
-    // each input byte is read from DRAM exactly once
-    let threads = rayon::current_num_threads().max(1);
-    let mut bands = threads.min(h).max(1);
-    while !h.is_multiple_of(bands) {
-        bands -= 1;
-    }
-    let r = h.div_ceil(bands);
-
-    // write into the caller's buffer, no allocation inside conv
+    // one reusable scratch band per rayon worker; no per-task allocation
     let out_data = Arc::make_mut(&mut output.data);
     out_data.resize(n * cout * h * w, 0f32);
 
-    out_data
-        .par_chunks_mut(r * w)
-        .enumerate()
-        .for_each(|(idx, out_band)| {
-            let n_i = idx / (cout * bands);
-            let co = (idx / bands) % cout;
-            let band = idx % bands;
-            let wbase_co = co * cin * 9;
-            let bias_v = bias_data[co];
+    // raw pointer to the output buffer; each task writes disjoint rows, so
+    // sharing it read-only across workers is safe despite &mut aliasing
+    #[derive(Clone, Copy)]
+    struct SendPtr(*mut f32);
+    unsafe impl Sync for SendPtr {}
+    unsafe impl Send for SendPtr {}
+    impl SendPtr {
+        #[inline(always)]
+        fn add(&self, offset: usize) -> *mut f32 {
+            unsafe { self.0.add(offset) }
+        }
+    }
+    let out_ptr = SendPtr(out_data.as_mut_ptr());
+    let batch_stride = cout * h * w;
+    let plane_stride = h * w;
 
-            for y in 0..r {
-                let oy = band * r + y;
-                let out_row = &mut out_band[y * w..(y + 1) * w];
-                out_row.fill(bias_v);
+    let pool = GLOBAL_THREAD_POOL
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("global thread pool not initialized during model load"))?;
+
+    pool.install(|| {
+        (0..n * bands).into_par_iter().for_each_init(
+            || vec![0f32; scratch_len],
+            |scratch, idx| {
+                let n_i = idx / bands;
+                let band = idx % bands;
+                let y0 = band * r;
+
+                // pad only rows y0-1 .. y0+r, so every kernel tap stays
+                // in-bounds and the hot loop stays branch-free
+                scratch.fill(0f32);
                 for ci in 0..cin {
-                    let iplane = (n_i * cin + ci) * ph * pw;
-                    let wtaps = &weight_data[wbase_co + ci * 9..wbase_co + ci * 9 + 9];
-                    for kh in 0..3 {
-                        let irow = iplane + (oy + kh) * pw;
-                        for kw in 0..3 {
-                            row_axpy(
-                                out_row,
-                                &padded[irow + kw..irow + kw + w],
-                                wtaps[kh * 3 + kw],
-                            );
+                    let src_base = (n_i * cin + ci) * h * w;
+                    let dst_base = ci * (r + 2) * pw;
+                    for sy in 0..r + 2 {
+                        let iy = y0 as isize - 1 + sy as isize;
+                        if iy >= 0 && (iy as usize) < h {
+                            let iy = iy as usize;
+                            scratch[dst_base + sy * pw + 1..dst_base + sy * pw + 1 + w]
+                                .copy_from_slice(
+                                    &in_data[src_base + iy * w..src_base + (iy + 1) * w],
+                                );
                         }
                     }
                 }
-                // fuse leaky_relu into conv, apply in-place to the just-written row
-                // instead of a separate conv-write + leaky-read + leaky-write pass
-                if apply_leaky {
-                    leaky_in_place(out_row, ALPHA);
+
+                // each task writes rows no other task touches, so this is race-free
+                unsafe {
+                    for co in 0..cout {
+                        let plane = out_ptr.add(n_i * batch_stride + co * plane_stride);
+                        let wbase_co = co * cin * 9;
+                        let bias_v = bias_data[co];
+                        for y in 0..r {
+                            let oy = y0 + y;
+                            let out_row = std::slice::from_raw_parts_mut(plane.add(oy * w), w);
+                            out_row.fill(bias_v);
+                            for ci in 0..cin {
+                                let iplane = ci * (r + 2) * pw;
+                                let wtaps = &weight_data[wbase_co + ci * 9..wbase_co + ci * 9 + 9];
+                                for kh in 0..3 {
+                                    let irow = iplane + (y + kh) * pw;
+                                    for kw in 0..3 {
+                                        row_axpy(
+                                            out_row,
+                                            &scratch[irow + kw..irow + kw + w],
+                                            wtaps[kh * 3 + kw],
+                                        );
+                                    }
+                                }
+                            }
+                            // fuse leaky_relu into conv, apply in-place to the just-written row
+                            // instead of a separate conv-write + leaky-read + leaky-write pass
+                            if apply_leaky {
+                                leaky_in_place(out_row, ALPHA);
+                            }
+                        }
+                    }
                 }
-            }
-        });
+            },
+        );
+    });
 
     output.dims = Arc::new(vec![in_dims[0], w_dims[0], in_dims[2], in_dims[3]]);
     Ok(())
@@ -259,57 +296,52 @@ pub fn leaky_relu(input: &Tensor, name: &str) -> Result<Tensor> {
     fn leaky_relu_inner(input: &[f32]) -> Result<Vec<f32>> {
         let mut data = vec![0f32; input.len()];
 
-        if data.len() >= 8 {
-            unsafe {
-                let zero = _mm256_setzero_ps();
-                let va = _mm256_set1_ps(ALPHA);
+        unsafe {
+            let zero = _mm256_setzero_ps();
+            let va = _mm256_set1_ps(ALPHA);
 
-                let (input_chunk32, input_rem32) = input.as_chunks::<32>();
-                let (output_chunk32, output_rem32) = data.as_chunks_mut::<32>();
+            let (input_chunk32, input_rem32) = input.as_chunks::<32>();
+            let (output_chunk32, output_rem32) = data.as_chunks_mut::<32>();
 
-                for (input, output) in input_chunk32.iter().zip(output_chunk32.iter_mut()) {
-                    let v0 = _mm256_loadu_ps(input.as_ptr());
-                    let v1 = _mm256_loadu_ps(input.as_ptr().add(8));
-                    let v2 = _mm256_loadu_ps(input.as_ptr().add(16));
-                    let v3 = _mm256_loadu_ps(input.as_ptr().add(24));
+            for (input, output) in input_chunk32.iter().zip(output_chunk32.iter_mut()) {
+                let v0 = _mm256_loadu_ps(input.as_ptr());
+                let v1 = _mm256_loadu_ps(input.as_ptr().add(8));
+                let v2 = _mm256_loadu_ps(input.as_ptr().add(16));
+                let v3 = _mm256_loadu_ps(input.as_ptr().add(24));
 
-                    let a0 = _mm256_mul_ps(v0, va);
-                    let a1 = _mm256_mul_ps(v1, va);
-                    let a2 = _mm256_mul_ps(v2, va);
-                    let a3 = _mm256_mul_ps(v3, va);
+                let a0 = _mm256_mul_ps(v0, va);
+                let a1 = _mm256_mul_ps(v1, va);
+                let a2 = _mm256_mul_ps(v2, va);
+                let a3 = _mm256_mul_ps(v3, va);
 
-                    let m0 = _mm256_cmp_ps(v0, zero, _CMP_LT_OQ);
-                    let m1 = _mm256_cmp_ps(v1, zero, _CMP_LT_OQ);
-                    let m2 = _mm256_cmp_ps(v2, zero, _CMP_LT_OQ);
-                    let m3 = _mm256_cmp_ps(v3, zero, _CMP_LT_OQ);
+                let m0 = _mm256_cmp_ps(v0, zero, _CMP_LT_OQ);
+                let m1 = _mm256_cmp_ps(v1, zero, _CMP_LT_OQ);
+                let m2 = _mm256_cmp_ps(v2, zero, _CMP_LT_OQ);
+                let m3 = _mm256_cmp_ps(v3, zero, _CMP_LT_OQ);
 
-                    let v0 = _mm256_blendv_ps(v0, a0, m0);
-                    let v1 = _mm256_blendv_ps(v1, a1, m1);
-                    let v2 = _mm256_blendv_ps(v2, a2, m2);
-                    let v3 = _mm256_blendv_ps(v3, a3, m3);
+                let v0 = _mm256_blendv_ps(v0, a0, m0);
+                let v1 = _mm256_blendv_ps(v1, a1, m1);
+                let v2 = _mm256_blendv_ps(v2, a2, m2);
+                let v3 = _mm256_blendv_ps(v3, a3, m3);
 
-                    _mm256_storeu_ps(output.as_mut_ptr(), v0);
-                    _mm256_storeu_ps(output.as_mut_ptr().add(8), v1);
-                    _mm256_storeu_ps(output.as_mut_ptr().add(16), v2);
-                    _mm256_storeu_ps(output.as_mut_ptr().add(24), v3);
-                }
-                let (input_chunk8, input_rem8) = input_rem32.as_chunks::<8>();
-                let (output_chunk8, output_rem8) = output_rem32.as_chunks_mut::<8>();
-                for (input, output) in input_chunk8.iter().zip(output_chunk8.iter_mut()) {
-                    let v = _mm256_loadu_ps(input.as_ptr());
-                    let a = _mm256_mul_ps(v, va);
-                    let m = _mm256_cmp_ps(v, zero, _CMP_LT_OQ);
-                    _mm256_storeu_ps(output.as_mut_ptr(), _mm256_blendv_ps(v, a, m));
-                }
-                for (&v, out) in input_rem8.iter().zip(output_rem8.iter_mut()) {
-                    *out = if v < 0.0 { ALPHA.algebraic_mul(v) } else { v };
-                }
+                _mm256_storeu_ps(output.as_mut_ptr(), v0);
+                _mm256_storeu_ps(output.as_mut_ptr().add(8), v1);
+                _mm256_storeu_ps(output.as_mut_ptr().add(16), v2);
+                _mm256_storeu_ps(output.as_mut_ptr().add(24), v3);
             }
-        } else {
-            for (&v, out) in input.iter().zip(data.iter_mut()) {
+            let (input_chunk8, input_rem8) = input_rem32.as_chunks::<8>();
+            let (output_chunk8, output_rem8) = output_rem32.as_chunks_mut::<8>();
+            for (input, output) in input_chunk8.iter().zip(output_chunk8.iter_mut()) {
+                let v = _mm256_loadu_ps(input.as_ptr());
+                let a = _mm256_mul_ps(v, va);
+                let m = _mm256_cmp_ps(v, zero, _CMP_LT_OQ);
+                _mm256_storeu_ps(output.as_mut_ptr(), _mm256_blendv_ps(v, a, m));
+            }
+            for (&v, out) in input_rem8.iter().zip(output_rem8.iter_mut()) {
                 *out = if v < 0.0 { ALPHA.algebraic_mul(v) } else { v };
             }
         }
+
         Ok(data)
     }
 
@@ -410,7 +442,7 @@ pub fn add(input_a: &Tensor, input_b: &Tensor, name: &str) -> Result<Tensor> {
                 i += 8;
             }
             while i < n {
-                *dp.add(i) = *ap.add(i) + *bp.add(i);
+                *dp.add(i) = (*ap.add(i)).algebraic_add(*bp.add(i));
                 i += 1;
             }
             data.set_len(n);
@@ -475,7 +507,7 @@ pub fn mul(input_a: &Tensor, input_b: &Tensor, name: &str) -> Result<Tensor> {
                 i += 8;
             }
             while i < n {
-                *dp.add(i) = *ap.add(i) * SCALAR;
+                *dp.add(i) = (*ap.add(i)).algebraic_mul(SCALAR);
                 i += 1;
             }
             data.set_len(n);

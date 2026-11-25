@@ -1,3 +1,8 @@
+# /// script
+# requires-python = ">=3.13"
+# dependencies = ["onnx"]
+# ///
+
 import onnx
 
 input_path = "esrgan.onnx"

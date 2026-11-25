@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 mod kernels;
 mod tensor;
 
+static GLOBAL_THREAD_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
 static INITIALIZERS: OnceLock<FxHashMap<String, Tensor>> = OnceLock::new();
 fn decode_model(bytes: &[u8]) -> Result<FxHashMap<String, Tensor>> {
     #[derive(Clone, PartialEq, Message)]
@@ -96,6 +97,12 @@ fn decode_model(bytes: &[u8]) -> Result<FxHashMap<String, Tensor>> {
         let tensor = Tensor::create(&tensor_proto.name, tensor_proto.dims, tensor_data)?;
         tensors.insert(tensor_proto.name, tensor);
     }
+
+    // init rayon thread pool
+    GLOBAL_THREAD_POOL
+        .set(rayon::ThreadPoolBuilder::new().build()?)
+        .map_err(|_| anyhow!("failed to init global thread pool"))?;
+
     Ok(tensors)
 }
 
@@ -104,7 +111,7 @@ pub fn load_model_from_file(path: impl AsRef<Path>) -> Result<()> {
     let weights = decode_model(&mmap[..])?;
     INITIALIZERS
         .set(weights)
-        .map_err(|_| anyhow!("failed to init weights"))?;
+        .map_err(|_| anyhow!("failed to init initializers"))?;
     Ok(())
 }
 
@@ -112,19 +119,19 @@ pub fn load_model_from_bytes(bytes: impl AsRef<[u8]>) -> Result<()> {
     let weights = decode_model(bytes.as_ref())?;
     INITIALIZERS
         .set(weights)
-        .map_err(|_| anyhow!("failed to init weights"))?;
+        .map_err(|_| anyhow!("failed to init initializers"))?;
     Ok(())
 }
 
 pub fn run(input: &Tensor) -> Result<Tensor> {
     let weights = INITIALIZERS
         .get()
-        .ok_or_else(|| anyhow!("weights not initialized"))?;
+        .ok_or_else(|| anyhow!("model not loaded yet"))?;
 
     let w = |name: &str| -> Result<&Tensor> {
         weights
             .get(name)
-            .ok_or_else(|| anyhow!("weight '{name}' not found"))
+            .ok_or_else(|| anyhow!("initializer '{name}' not found"))
     };
 
     // allocate an output buffer for a conv given its input + weight dims
