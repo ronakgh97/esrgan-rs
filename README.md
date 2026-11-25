@@ -1,6 +1,6 @@
 **esrgan-rs** - running OG ESRGAN using pure rust on CPU (AVX2 accelerated + fallback) with no python, no torch or cuda.
 
-The [model](https://aihub.qualcomm.com/compute/models/esrgan) used is from Qualcomm AI Hub as `.onnx` format.
+The [model](https://aihub.qualcomm.com/compute/models/esrgan) used, is from Qualcomm AI Hub as `.onnx` format.
 
 ```text
 esrgan-onnx-float/
@@ -15,7 +15,7 @@ The model is provided as `.onnx` and `.data` files, but in order to collect the 
 together initially, It's needs to be merged using `merge.py`. So it can read as single `.onnx` file,
 which can also be used in other runtimes.
 
-The project contains only three files (690 loc):
+The project contains only three files (991 loc):
 
 - [lib](src/lib.rs) - main library file (load_model and run)
 - [kernels](src/kernels.rs) - kernel implementations (conv, leaky relu, concat, add, mul and resize)
